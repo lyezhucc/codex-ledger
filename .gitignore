@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# Output (CSV 报告不提交)
+output/
+
+# macOS
+.DS_Store
+
+# Desktop output
+desktop/
