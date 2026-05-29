@@ -38,6 +38,111 @@ TOKEN_FIELDS = [
     "total_tokens",
 ]
 
+# ── 定价数据（每 1M token 的美元价格，2026 年 5 月估算） ──
+# 注意：Codex 是订阅制产品，不是 API 按量计费。下方 "Codex API" 是
+# 按同级别 OpenAI API 模型价格估算，仅供对比参考，不代表实际账单。
+PRICING = {
+    "openai_api": {
+        "label": "OpenAI API (GPT-5 同级)",
+        "models": {
+            "gpt-5.4":       {"input": 2.50, "cached_input": 1.25, "output": 10.00},
+            "gpt-5.5":       {"input": 5.00, "cached_input": 2.50, "output": 20.00},
+            "gpt-5.4-mini":  {"input": 0.30, "cached_input": 0.15, "output": 1.20},
+            # fallback for unknown models
+            "__default__":   {"input": 2.50, "cached_input": 1.25, "output": 10.00},
+        },
+    },
+    "deepseek_v4_pro": {
+        "label": "DeepSeek V4 Pro",
+        "models": {
+            # DeepSeek 不区分缓存命中/未命中，input 统一价
+            "__any__":       {"input": 0.28, "cached_input": 0.28, "output": 1.10},
+        },
+    },
+    "claude_opus": {
+        "label": "Claude Opus 4.8 (API)",
+        "models": {
+            "__any__":       {"input": 15.00, "cached_input": 1.50, "output": 75.00},
+        },
+    },
+    "claude_sonnet": {
+        "label": "Claude Sonnet 4.6 (API)",
+        "models": {
+            "__any__":       {"input": 3.00, "cached_input": 0.30, "output": 15.00},
+        },
+    },
+}
+
+
+def get_model_price(provider_key: str, model: str) -> dict:
+    """查询某供应商对某模型的价格（每 1M token USD）。"""
+    provider = PRICING.get(provider_key, {})
+    models = provider.get("models", {})
+    if model in models:
+        return models[model]
+    if "__any__" in models:
+        return models["__any__"]
+    return models.get("__default__", {"input": 0, "cached_input": 0, "output": 0})
+
+
+def calc_cost(tokens: Dict[str, int], provider_key: str, model: str) -> Dict[str, float]:
+    """根据 token 量和供应商价格计算费用（USD）。"""
+    price = get_model_price(provider_key, model)
+    cached = tokens.get("cached_input_tokens", 0)
+    uncached = tokens["input_tokens"] - cached
+    cost_cached = (cached / 1_000_000) * price["cached_input"]
+    cost_uncached = (uncached / 1_000_000) * price["input"]
+    cost_output = (tokens["output_tokens"] / 1_000_000) * price["output"]
+    return {
+        "provider": provider_key,
+        "model": model,
+        "cost_cached_input": round(cost_cached, 2),
+        "cost_uncached_input": round(cost_uncached, 2),
+        "cost_output": round(cost_output, 2),
+        "cost_total": round(cost_cached + cost_uncached + cost_output, 2),
+    }
+
+
+def build_pricing_table(
+    daily_by_model: List[Dict[str, Any]],
+    model_totals: List[Dict[str, Any]],
+    grand: Dict[str, int],
+) -> Dict[str, Any]:
+    """按供应商计算费用汇总。"""
+    result: Dict[str, Any] = {}
+
+    for provider_key in PRICING:
+        provider_label = PRICING[provider_key]["label"]
+
+        # 按天+模型计算
+        daily_rows = []
+        grand_cost = 0.0
+        for row in daily_by_model:
+            cost = calc_cost(row, provider_key, row["model"])
+            daily_rows.append({**row, **cost})
+            grand_cost += cost["cost_total"]
+
+        # 按模型汇总
+        model_cost_rows = []
+        for row in model_totals:
+            cost = calc_cost(row, provider_key, row["model"])
+            model_cost_rows.append({**row, **cost})
+
+        # 总量
+        grand_cost_row = calc_cost(grand, provider_key, list(
+            PRICING[provider_key]["models"].keys()
+        )[0] if "__any__" not in PRICING[provider_key]["models"] else "__any__")
+
+        result[provider_key] = {
+            "label": provider_label,
+            "daily": daily_rows,
+            "by_model": model_cost_rows,
+            "grand_cost": round(grand_cost, 2),
+            "grand_detail": grand_cost_row,
+        }
+
+    return result
+
 # ── 工具函数 ──────────────────────────────────────────────
 
 
@@ -577,6 +682,7 @@ def export_csvs(
     model_totals: List[Dict[str, Any]],
     account_totals: List[Dict[str, Any]],
     grand: Dict[str, int],
+    pricing_data: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """导出所有 CSV 文件，返回文件路径列表。"""
     files_written = []
@@ -619,6 +725,31 @@ def export_csvs(
     write_csv(path, [grand], gt_fields)
     files_written.append(path)
 
+    # 定价 CSV
+    if pricing_data:
+        for provider_key, pd in pricing_data.items():
+            # daily_by_model_pricing_{provider}.csv
+            price_fields = [
+                "date", "model",
+                "input_tokens", "cached_input_tokens", "output_tokens",
+                "reasoning_output_tokens", "total_tokens",
+                "cost_cached_input", "cost_uncached_input", "cost_output", "cost_total",
+            ]
+            path = os.path.join(output_dir, f"daily_pricing_{provider_key}.csv")
+            write_csv(path, pd["daily"], price_fields)
+            files_written.append(path)
+
+            # model_total_pricing_{provider}.csv
+            mt_price_fields = [
+                "model",
+                "input_tokens", "cached_input_tokens", "output_tokens",
+                "reasoning_output_tokens", "total_tokens",
+                "cost_cached_input", "cost_uncached_input", "cost_output", "cost_total",
+            ]
+            path = os.path.join(output_dir, f"model_pricing_{provider_key}.csv")
+            write_csv(path, pd["by_model"], mt_price_fields)
+            files_written.append(path)
+
     return files_written
 
 
@@ -650,6 +781,7 @@ def print_report(
     output_dir: str,
     files_written: List[str],
     json_path: Optional[str],
+    pricing_data: Optional[Dict[str, Any]] = None,
 ) -> None:
     """打印终端汇总报告。"""
     events = scan_result["events"]
@@ -711,6 +843,50 @@ def print_report(
         print(f"  {'-'*30} {'-'*15}")
         for row in account_totals:
             print(f"  {row['account']:<30} {fmt_num(row['total_tokens']):>15}")
+        print()
+
+    # 定价换算
+    if pricing_data:
+        print()
+        print("  ── 跨供应商价格换算（估算，仅供参考）──")
+
+        # 每日明细示例（最新一天）
+        if daily_model:
+            from collections import defaultdict
+            day_detail: Dict[str, Dict[str, int]] = defaultdict(
+                lambda: {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0}
+            )
+            for row in daily_model:
+                d = row["date"]
+                day_detail[d]["input_tokens"] += row["input_tokens"]
+                day_detail[d]["cached_input_tokens"] += row["cached_input_tokens"]
+                day_detail[d]["output_tokens"] += row["output_tokens"]
+                day_detail[d]["reasoning_output_tokens"] += row["reasoning_output_tokens"]
+
+            latest_date = sorted(day_detail.keys())[-1]
+            dd = day_detail[latest_date]
+            uncached = dd["input_tokens"] - dd["cached_input_tokens"]
+            print()
+            print(f"  📅 {latest_date} 日明细：")
+            print(f"    输入（命中缓存）: {fmt_num(dd['cached_input_tokens'])} tokens")
+            print(f"    输入（未命中）:   {fmt_num(uncached)} tokens")
+            print(f"    输出:             {fmt_num(dd['output_tokens'])} tokens")
+            print(f"    推理输出:         {fmt_num(dd['reasoning_output_tokens'])} tokens")
+            print()
+
+        # 总费用对比表
+        print(f"  {'供应商':<30} {'估算费用 (USD)':>18}")
+        print(f"  {'-'*30} {'-'*18}")
+        for provider_key, pd in pricing_data.items():
+            label = pd["label"]
+            cost = pd["grand_cost"]
+            print(f"  {label:<30} ${cost:>17,.2f}")
+
+        # 如果只有 default 账号，show 一下 DeepSeek 和 Claude vs OpenAI 的对比
+        print()
+        print("  💡 以上为估算值。Codex 是订阅制，不按 token 计费；")
+        print("     API 价格按各供应商公开定价估算（2026 年 5 月）。")
+        print("     详见: ~/Desktop/codex-ledger-report/daily_pricing_*.csv")
         print()
 
     # 输出文件
@@ -779,6 +955,12 @@ def main() -> None:
         default=False,
         help="开启路径日期粗过滤（>=14 天 buffer，可能漏长会话）",
     )
+    parser.add_argument(
+        "--pricing",
+        action="store_true",
+        default=False,
+        help="输出跨供应商价格换算（OpenAI API / DeepSeek / Claude）",
+    )
 
     args = parser.parse_args()
 
@@ -846,6 +1028,11 @@ def main() -> None:
     account_totals = aggregate_by_account(events)
     grand = grand_total(events)
 
+    # 定价换算
+    pricing_data: Optional[Dict[str, Any]] = None
+    if args.pricing:
+        pricing_data = build_pricing_table(daily_model, model_totals, grand)
+
     # 导出 CSV
     files_written = export_csvs(
         output_dir,
@@ -855,6 +1042,7 @@ def main() -> None:
         model_totals,
         account_totals,
         grand,
+        pricing_data,
     )
 
     # 导出 JSON
@@ -878,6 +1066,17 @@ def main() -> None:
             "daily_by_account_model": daily_account_model,
             "raw_events": events,
         }
+        if pricing_data:
+            # 把 pricing 里不可序列化的 float 转好
+            report_data["pricing"] = {
+                k: {
+                    "label": v["label"],
+                    "grand_cost": v["grand_cost"],
+                    "grand_detail": v["grand_detail"],
+                    "by_model": v["by_model"],
+                }
+                for k, v in pricing_data.items()
+            }
         json_path = export_json(output_dir, report_data)
 
     # 终端报告
@@ -890,6 +1089,7 @@ def main() -> None:
         output_dir,
         files_written,
         json_path,
+        pricing_data,
     )
 
 
