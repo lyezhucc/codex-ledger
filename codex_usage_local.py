@@ -209,8 +209,10 @@ def process_rollout_file(
     current_model: str = "unknown"
     session_id: str = "unknown"
     cwd: str = "unknown"
-    # 标记本文件第一条有效增量事件是否来自疑似 fork 继承的累计值
-    first_event_suspicious: bool = False
+    # 标记最近一次 append 的增量事件是否来自 suspicious inherited baseline。
+    # 仅在 append suspicious 事件后置 True；append 普通事件后置 False。
+    # 负 delta 只在该标记为 True 时允许回溯 pop。
+    last_event_suspicious_baseline: bool = False
 
     # 启发式阈值：第一个 token_count 超过此值可能是 fork 继承的历史累计
     FORK_SUSPICIOUS_THRESHOLD = 5_000_000
@@ -301,10 +303,10 @@ def process_rollout_file(
                     if prev_tokens is None:
                         # 第一个 token_count 事件：通常 total 从 0 开始，直接作为增量。
                         # 但如果 total 超过阈值，可能是 fork 继承的历史累计值。
-                        first_event_suspicious = (
+                        is_suspicious = (
                             current["total_tokens"] > FORK_SUSPICIOUS_THRESHOLD
                         )
-                        if first_event_suspicious:
+                        if is_suspicious:
                             warnings += 1
                             if debug:
                                 print(
@@ -318,6 +320,8 @@ def process_rollout_file(
                             prev_tokens = current
                             continue
                         delta = dict(current)
+                        # 记录本条增量是否来自 suspicious baseline（后续负 delta 回溯用）
+                        last_event_suspicious_baseline = is_suspicious
                     else:
                         delta = {}
                         all_zero_delta = True
@@ -335,7 +339,7 @@ def process_rollout_file(
                         # 检查负数 delta（计数器重置）
                         if delta["total_tokens"] < 0:
                             warnings += 1
-                            if first_event_suspicious:
+                            if last_event_suspicious_baseline:
                                 # 只有上一条事件被明确标记为 suspicious inherited baseline
                                 # 时，才允许回溯移除（它来自 fork 继承的历史值，不是真正消耗）
                                 if debug:
@@ -354,7 +358,7 @@ def process_rollout_file(
                                             file=sys.stderr,
                                         )
                                 delta = dict(current)
-                                first_event_suspicious = False  # 已处理，重置标记
+                                last_event_suspicious_baseline = False  # 已处理，重置标记
                             else:
                                 # 普通负 delta：不删除上一条，只记录 warning，
                                 # 并把 current 作为新一段的增量
@@ -368,6 +372,9 @@ def process_rollout_file(
                                         file=sys.stderr,
                                     )
                                 delta = dict(current)
+                        else:
+                            # 正 delta：本条是普通增量事件，清除 suspicious 标记
+                            last_event_suspicious_baseline = False
 
                     prev_tokens = current
 
