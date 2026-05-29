@@ -55,8 +55,9 @@ PRICING = {
     "deepseek_v4_pro": {
         "label": "DeepSeek V4 Pro (旗舰)",
         "models": {
-            # DeepSeek 旗舰模型定价 (per 1M tokens USD)
-            "__any__":       {"input": 0.55, "cached_input": 0.14, "output": 2.19},
+            # 实际公开价 (2026-05-22 永久降价75%后 per 1M tokens USD)
+            # https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+            "__any__":       {"input": 0.435, "cached_input": 0.003625, "output": 0.87},
         },
     },
     "claude_opus": {
