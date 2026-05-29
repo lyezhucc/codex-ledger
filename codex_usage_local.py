@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Codex 本地 Token 使用量统计工具。
+"""codex-ledger —— Codex 本地 Token 使用量统计工具。
 
 从 ~/.codex/sessions/ 读取 rollout-*.jsonl 文件，
 用增量算法统计 token 消耗（按天/模型/账号），导出 CSV。
@@ -721,7 +721,7 @@ def main() -> None:
         "--out",
         type=str,
         default=None,
-        help="CSV 输出目录（默认 ~/Desktop/codex-usage-report）",
+        help="CSV 输出目录（默认 ~/Desktop/codex-ledger-report）",
     )
     parser.add_argument(
         "--json",
@@ -757,7 +757,7 @@ def main() -> None:
     if args.out:
         output_dir = os.path.expanduser(args.out)
     else:
-        output_dir = os.path.expanduser("~/Desktop/codex-usage-report")
+        output_dir = os.path.expanduser("~/Desktop/codex-ledger-report")
 
     # 解析 sessions 目录
     sessions_dirs: List[Path] = []

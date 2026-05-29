@@ -1,4 +1,4 @@
-# Codex Usage Local
+# codex-ledger
 
 本地 Codex CLI token 使用量统计工具。从 `~/.codex/sessions/` 读取 rollout JSONL 日志，用增量算法计算每日 token 消耗。
 
@@ -20,7 +20,7 @@ python3 codex_usage_local.py --since 2026-05-03 --out ~/Desktop/report --json --
 
 ## 输出
 
-终端打印汇总后，导出以下 CSV 到 `--out` 目录（默认 `~/Desktop/codex-usage-report`）：
+终端打印汇总后，导出以下 CSV 到 `--out` 目录（默认 `~/Desktop/codex-ledger-report`）：
 
 | 文件 | 内容 |
 |------|------|
@@ -109,7 +109,7 @@ python3 tests/test_sample.py
 ## 项目结构
 
 ```
-codex-usage-local/
+codex-ledger/
 ├── codex_usage_local.py    # 主工具
 ├── README.md
 ├── tests/

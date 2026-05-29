@@ -9,6 +9,7 @@ __pycache__/
 
 # Output (CSV 报告不提交)
 output/
+tests/fixtures/sample_output.txt
 
 # macOS
 .DS_Store
