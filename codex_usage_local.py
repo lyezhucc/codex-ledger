@@ -52,12 +52,11 @@ PRICING = {
             "__default__":   {"input": 2.50, "cached_input": 1.25, "output": 10.00},
         },
     },
-    "deepseek": {
-        "label": "DeepSeek (V3/R1 级别)",
+    "deepseek_v4_pro": {
+        "label": "DeepSeek V4 Pro (旗舰)",
         "models": {
-            # DeepSeek-V3: ￥1/M input (命中￥0.1), ￥2/M output
-            # 折合 USD ≈ $0.14 / $0.014 / $0.28
-            "__any__":       {"input": 0.14, "cached_input": 0.014, "output": 0.28},
+            # DeepSeek 旗舰模型定价 (per 1M tokens USD)
+            "__any__":       {"input": 0.55, "cached_input": 0.14, "output": 2.19},
         },
     },
     "claude_opus": {
