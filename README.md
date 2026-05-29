@@ -103,6 +103,20 @@ Skill 文件：
 - `skills/codex-ledger/templates/report_summary_template.md` — 输出格式模板
 - `skills/codex-ledger/examples/sample_commands.md` — 常用命令示例
 
+### 安装为 Codex Skill
+
+```bash
+bash install_skill.sh
+```
+
+安装后，Codex 可识别本工具。对话中直接说：
+
+> "统计我从 5 月 3 日开始 Codex 用了多少 token，按模型和每天列出来。"
+
+Codex 会自动执行统计并给出中文总结。
+
+> **注意：** 安装路径为 `~/.codex/skills/codex-ledger/`。如果 Codex 官方 skill 目录后续调整，请相应修改 `install_skill.sh`。卸载：`rm -rf ~/.codex/skills/codex-ledger`
+
 ## 输出
 
 终端打印汇总后，导出以下 CSV 到 `--out` 目录（默认 `~/Desktop/codex-ledger-report`）：
@@ -213,6 +227,7 @@ python3 tests/test_payload_type_only.py
 python3 tests/test_missing_fields.py
 python3 tests/test_negative_delta_no_pop.py
 python3 tests/test_suspicious_fork_pop.py
+python3 tests/test_suspicious_then_normal.py
 python3 tests/test_since_boundary.py
 ```
 
