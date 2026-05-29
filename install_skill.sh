@@ -3,6 +3,12 @@
 # 将 skill 定义复制到 Codex 可识别的目录，使 Codex 能在对话中自动调用本工具。
 set -e
 
+# 环境检查
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "❌ 未找到 python3，请先安装 Python 3.10+"
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_SRC="$SCRIPT_DIR/skills/codex-ledger"
 SKILL_DEST="$HOME/.codex/skills/codex-ledger"
