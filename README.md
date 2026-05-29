@@ -21,6 +21,88 @@ python3 codex_usage_local.py --since 2026-05-03 --out ~/Desktop/report --json --
 python3 codex_usage_local.py --since 2026-05-03 --fast-path-filter ~/.codex
 ```
 
+## 给普通用户的使用教程
+
+### 1. 下载项目
+
+```bash
+git clone https://github.com/lyezhucc/codex-ledger.git
+cd codex-ledger
+```
+
+### 2. 运行测试（确认环境正常）
+
+```bash
+bash run_tests.sh
+```
+
+### 3. 统计默认 Codex 账号
+
+```bash
+python3 codex_usage_local.py \
+  --since 2026-05-03 \
+  --tz Asia/Shanghai \
+  --out ~/Desktop/codex-ledger-report \
+  --json \
+  ~/.codex
+```
+
+### 4. 查看结果
+
+```bash
+open ~/Desktop/codex-ledger-report
+```
+
+重点看：
+
+| 文件 | 用途 |
+|------|------|
+| `grand_total.csv` | 总 token |
+| `model_total.csv` | 按模型统计 |
+| `daily_by_model.csv` | 按天+模型统计 |
+| `raw_events.csv` | 原始增量事件，排查异常用 |
+| `report.json` | 完整 JSON 报告 |
+
+### 5. 统计多个 Codex 目录
+
+```bash
+python3 codex_usage_local.py \
+  --since 2026-05-03 \
+  --tz Asia/Shanghai \
+  --out ~/Desktop/codex-ledger-report \
+  --json \
+  ~/.codex \
+  ~/codex-profiles/work/.codex \
+  ~/codex-profiles/personal/.codex
+```
+
+### 6. 常见问题
+
+**为什么统计很慢？**
+默认是全量扫描，准确优先。可以加 `--fast-path-filter` 加速，但它可能漏掉跨很多天的长会话。
+
+**为什么统计不到 Codex Web 的用量？**
+本工具只读取本机 `~/.codex/sessions`。如果 Codex Web/App/远程任务没有写到本机日志，就统计不到。
+
+**为什么不能直接看 total_token_usage 相加？**
+因为它是一个 rollout 内的累计值，不是单次消耗。直接相加会严重高估。
+
+## Codex 对话式使用
+
+本仓库包含 Skill 定义，让 Codex 能在对话中自动调用本工具。
+
+Codex 读取 `AGENTS.md` 和 `skills/codex-ledger/SKILL.md` 后，用户只需说：
+
+> "统计我从 5 月 3 日开始 Codex 用了多少 token，按模型列出来"
+
+Codex 会自动执行统计并给出中文总结。
+
+Skill 文件：
+- `skills/codex-ledger/SKILL.md` — 告诉 Codex 何时触发、如何运行、如何解释结果
+- `AGENTS.md` — 仓库级 agent 指令
+- `skills/codex-ledger/templates/report_summary_template.md` — 输出格式模板
+- `skills/codex-ledger/examples/sample_commands.md` — 常用命令示例
+
 ## 输出
 
 终端打印汇总后，导出以下 CSV 到 `--out` 目录（默认 `~/Desktop/codex-ledger-report`）：
@@ -138,22 +220,33 @@ python3 tests/test_since_boundary.py
 
 ```
 codex-ledger/
-├── codex_usage_local.py    # 主工具
-├── README.md
-├── LICENSE
+├── codex_usage_local.py          # 主工具
+├── README.md                     # 人看
+├── AGENTS.md                     # Codex / coding agent 看
+├── LICENSE                       # MIT
+├── run_tests.sh                  # 一键测试
+├── .gitignore
+├── skills/
+│   └── codex-ledger/
+│       ├── SKILL.md              # Skill 定义（触发条件、运行方式、输出格式）
+│       ├── scripts/              # 主脚本符号链接
+│       ├── templates/            # 输出格式模板
+│       └── examples/             # 常用命令示例
 ├── tests/
 │   ├── fixtures/
-│   │   ├── sample/                         # 基础增量算法用例
+│   │   ├── sample/                         # 基础增量算法
 │   │   ├── payload_type_only/              # 不依赖外层 event type
 │   │   ├── missing_fields/                 # 缺失字段容错
 │   │   ├── negative_delta_no_pop/          # 普通负 delta 不 pop
-│   │   ├── suspicious_fork_pop/            # suspicious 时负 delta回溯
+│   │   ├── suspicious_fork_pop/            # suspicious 时负 delta 回溯
+│   │   ├── suspicious_then_normal/         # suspicious→正常→负delta 不误pop
 │   │   └── since_boundary/                # --since 跨边界基线
 │   ├── test_sample.py
 │   ├── test_payload_type_only.py
 │   ├── test_missing_fields.py
 │   ├── test_negative_delta_no_pop.py
 │   ├── test_suspicious_fork_pop.py
+│   ├── test_suspicious_then_normal.py
 │   └── test_since_boundary.py
 └── output/
 ```
