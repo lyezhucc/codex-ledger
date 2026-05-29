@@ -155,21 +155,38 @@ def date_str_from_path(file_path: Path) -> Optional[str]:
 
 def extract_token_info(
     info: dict,
-) -> Optional[Dict[str, int]]:
-    """从 payload.info 中提取 token 数据。"""
+) -> Tuple[Optional[Dict[str, int]], int]:
+    """从 payload.info 中提取 token 数据。缺失字段默认 0。
+
+    返回: (token_dict_or_none, warning_count)
+      - 仅当 total_token_usage 完全缺失时返回 None
+      - total_tokens 缺失时尝试 input_tokens + output_tokens 推导
+      - reasoning_output_tokens / cached_input_tokens 缺失默认 0
+    """
     if info is None:
-        return None
+        return None, 0
     tu = info.get("total_token_usage")
     if not tu or not isinstance(tu, dict):
-        return None
-    result = {}
+        return None, 0
+
+    result: Dict[str, int] = {}
+    warnings = 0
+
     for field in TOKEN_FIELDS:
         val = tu.get(field)
         if isinstance(val, (int, float)):
             result[field] = int(val)
         else:
-            return None  # 缺少必要字段
-    return result
+            result[field] = 0  # 缺失字段默认 0，不跳过整条
+
+    # total_tokens 为 0 但 input/output 有值时，尝试推导
+    if result["total_tokens"] == 0 and (result["input_tokens"] > 0 or result["output_tokens"] > 0):
+        derived = result["input_tokens"] + result["output_tokens"]
+        if derived > 0:
+            result["total_tokens"] = derived
+            warnings += 1
+
+    return result, warnings
 
 
 # ── 核心统计逻辑 ──────────────────────────────────────────
@@ -192,6 +209,8 @@ def process_rollout_file(
     current_model: str = "unknown"
     session_id: str = "unknown"
     cwd: str = "unknown"
+    # 标记本文件第一条有效增量事件是否来自疑似 fork 继承的累计值
+    first_event_suspicious: bool = False
 
     # 启发式阈值：第一个 token_count 超过此值可能是 fork 继承的历史累计
     FORK_SUSPICIOUS_THRESHOLD = 5_000_000
@@ -214,11 +233,10 @@ def process_rollout_file(
                 event_type = obj.get("type", "")
                 payload = obj.get("payload", {}) if isinstance(obj.get("payload"), dict) else {}
 
-                # 追踪 model（从 turn_context 或 session_meta 中提取）
-                if event_type in ("turn_context", "session_meta"):
-                    model = find_model_recursive(payload)
-                    if model:
-                        current_model = model
+                # 每行都递归查找 model 字段，找到就更新
+                model = find_model_recursive(obj)
+                if model:
+                    current_model = model
 
                 # 提取 session_meta 信息
                 if event_type == "session_meta":
@@ -229,15 +247,16 @@ def process_rollout_file(
                     if c:
                         cwd = str(c)
 
-                # 处理 token_count 事件
-                if event_type == "event_msg" and payload.get("type") == "token_count":
+                # 处理 token_count 事件（只检查 payload.type，不强依赖外层 event 类型）
+                if isinstance(payload, dict) and payload.get("type") == "token_count":
                     info = payload.get("info")
 
                     # info 为 null 或缺失，跳过
                     if info is None:
                         continue
 
-                    current = extract_token_info(info)
+                    current, extract_warns = extract_token_info(info)
+                    warnings += extract_warns
                     if current is None:
                         continue
 
@@ -281,14 +300,17 @@ def process_rollout_file(
                     # 计算增量
                     if prev_tokens is None:
                         # 第一个 token_count 事件：通常 total 从 0 开始，直接作为增量。
-                        # 但 fork session 可能继承历史累计值（几百万起步）。
-                        if current["total_tokens"] > FORK_SUSPICIOUS_THRESHOLD:
+                        # 但如果 total 超过阈值，可能是 fork 继承的历史累计值。
+                        first_event_suspicious = (
+                            current["total_tokens"] > FORK_SUSPICIOUS_THRESHOLD
+                        )
+                        if first_event_suspicious:
                             warnings += 1
                             if debug:
                                 print(
                                     f"  [WARN] 首个 token_count total={current['total_tokens']:,} "
                                     f"超过阈值 {FORK_SUSPICIOUS_THRESHOLD:,}，"
-                                    f"可能是 fork/resume 继承的历史值: {file_path.name}",
+                                    f"标记为 suspicious inherited baseline: {file_path.name}",
                                     file=sys.stderr,
                                 )
                         # 检查是否全为 0（初始占位事件）
@@ -310,28 +332,42 @@ def process_rollout_file(
                             prev_tokens = current
                             continue
 
-                        # 检查负数 delta（计数器重置，典型的 fork 特征）
+                        # 检查负数 delta（计数器重置）
                         if delta["total_tokens"] < 0:
                             warnings += 1
-                            if debug:
-                                print(
-                                    f"  [WARN] delta total_tokens={delta['total_tokens']:,} 为负，"
-                                    f"视为 fork 计数器重置。回溯移除上一个错误增量"
-                                    f"(total={prev_tokens['total_tokens']:,})，"
-                                    f"用当前值重新开始: {file_path.name}",
-                                    file=sys.stderr,
-                                )
-                            # 回溯：移除上一个事件（来自 fork 继承的历史值，不是真正消耗）
-                            if events and events[-1]["file"] == str(file_path):
-                                popped = events.pop()
+                            if first_event_suspicious:
+                                # 只有上一条事件被明确标记为 suspicious inherited baseline
+                                # 时，才允许回溯移除（它来自 fork 继承的历史值，不是真正消耗）
                                 if debug:
                                     print(
-                                        f"      已移除错误事件: "
-                                        f"total_tokens={popped['total_tokens']:,}",
+                                        f"  [WARN] delta total_tokens={delta['total_tokens']:,} 为负，"
+                                        f"上一条为 suspicious baseline (total={prev_tokens['total_tokens']:,})，"
+                                        f"回溯移除并重置: {file_path.name}",
                                         file=sys.stderr,
                                     )
-                            # 用当前值作为新一段的起点（增量）
-                            delta = dict(current)
+                                if events and events[-1]["file"] == str(file_path):
+                                    popped = events.pop()
+                                    if debug:
+                                        print(
+                                            f"      已移除 suspicious 事件: "
+                                            f"total_tokens={popped['total_tokens']:,}",
+                                            file=sys.stderr,
+                                        )
+                                delta = dict(current)
+                                first_event_suspicious = False  # 已处理，重置标记
+                            else:
+                                # 普通负 delta：不删除上一条，只记录 warning，
+                                # 并把 current 作为新一段的增量
+                                if debug:
+                                    print(
+                                        f"  [WARN] delta total_tokens={delta['total_tokens']:,} 为负，"
+                                        f"上一条非 suspicious，保留上一条并重置基线"
+                                        f" (prev_total={prev_tokens['total_tokens']:,}, "
+                                        f"current_total={current['total_tokens']:,}): "
+                                        f"{file_path.name}",
+                                        file=sys.stderr,
+                                    )
+                                delta = dict(current)
 
                     prev_tokens = current
 
@@ -365,8 +401,14 @@ def scan_all_rollouts(
     tz: timezone,
     since_date: Optional[datetime],
     debug: bool = False,
+    fast_path_filter: bool = False,
 ) -> Dict[str, Any]:
-    """扫描所有 rollout 文件，返回统计结果。"""
+    """扫描所有 rollout 文件，返回统计结果。
+
+    默认全量扫描，按事件 timestamp 精确过滤。
+    开启 fast_path_filter 时用路径日期粗过滤（可能漏长会话，需 >=14 天 buffer）。
+    """
+    FAST_PATH_BUFFER_DAYS = 14
     all_events: List[Dict[str, Any]] = []
     total_files = 0
     total_warnings = 0
@@ -386,17 +428,16 @@ def scan_all_rollouts(
 
                 file_path = Path(root) / fname
 
-                # 粗过滤：路径中的日期比 since_date 早 1 天以上才跳过
-                # 多保留 1 天的余量，防止午夜边界丢失事件
-                file_date = date_str_from_path(file_path)
-                if file_date and since_date is not None:
-                    try:
-                        fd = datetime.strptime(file_date, "%Y-%m-%d").replace(tzinfo=tz)
-                        # 保留 since_date 前一天的文件（午夜边界安全余量）
-                        if fd < since_date - timedelta(days=1):
-                            continue
-                    except ValueError:
-                        pass
+                # fast_path_filter 模式：用路径日期粗过滤（>=14 天 buffer）
+                if fast_path_filter:
+                    file_date = date_str_from_path(file_path)
+                    if file_date and since_date is not None:
+                        try:
+                            fd = datetime.strptime(file_date, "%Y-%m-%d").replace(tzinfo=tz)
+                            if fd < since_date - timedelta(days=FAST_PATH_BUFFER_DAYS):
+                                continue
+                        except ValueError:
+                            pass
 
                 file_list.append((file_path, account))
 
@@ -411,17 +452,6 @@ def scan_all_rollouts(
         print(f"找到 {total_to_scan} 个 rollout 文件", file=sys.stderr)
 
     for idx, (file_path, account) in enumerate(file_list):
-        # 用文件路径中的日期做第二层粗过滤
-        file_date = date_str_from_path(file_path)
-        if file_date and since_date is not None:
-            try:
-                fd = datetime.strptime(file_date, "%Y-%m-%d").replace(tzinfo=tz)
-                if fd < since_date:
-                    # 前一天的文件：仍扫描但只保留 since_date 之后的事件（午夜安全）
-                    pass  # 不跳过，让 process_rollout_file 按事件时间戳精确过滤
-            except ValueError:
-                pass
-
         total_files += 1
         events, warns = process_rollout_file(
             file_path, account, tz, since_date, debug=debug
@@ -638,7 +668,7 @@ def print_report(
     print(f"  output_tokens:                  {fmt_num(grand['output_tokens'])}")
     print(f"  reasoning_output_tokens:        {fmt_num(grand['reasoning_output_tokens'])}")
     print()
-    print(f"  实际消耗 (input - cached + output): {fmt_num(grand['input_tokens'] - grand['cached_input_tokens'] + grand['output_tokens'])}")
+    print(f"  非缓存输入+输出（仅参考，不等于官方账单）: {fmt_num(grand['input_tokens'] - grand['cached_input_tokens'] + grand['output_tokens'])}")
     print()
 
     # 按模型汇总
@@ -736,6 +766,12 @@ def main() -> None:
         default=False,
         help="打印扫描详情和 warning",
     )
+    parser.add_argument(
+        "--fast-path-filter",
+        action="store_true",
+        default=False,
+        help="开启路径日期粗过滤（>=14 天 buffer，可能漏长会话）",
+    )
 
     args = parser.parse_args()
 
@@ -789,7 +825,9 @@ def main() -> None:
         print("开始扫描...", file=sys.stderr)
 
     scan_result = scan_all_rollouts(
-        sessions_dirs, account_names, tz, since_date, debug=args.debug
+        sessions_dirs, account_names, tz, since_date,
+        debug=args.debug,
+        fast_path_filter=args.fast_path_filter,
     )
 
     events = scan_result["events"]

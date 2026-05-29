@@ -14,8 +14,11 @@ python3 codex_usage_local.py --since 2026-05-03 --tz Asia/Shanghai ~/.codex
 # 多账号
 python3 codex_usage_local.py --since 2026-05-03 ~/.codex ~/account-b/.codex
 
-# 自定义输出目录 + JSON + debug
+# 自定义输出 + JSON + debug
 python3 codex_usage_local.py --since 2026-05-03 --out ~/Desktop/report --json --debug
+
+# 启用路径日期粗过滤（加速但可能漏长会话）
+python3 codex_usage_local.py --since 2026-05-03 --fast-path-filter ~/.codex
 ```
 
 ## 输出
@@ -51,27 +54,47 @@ Codex 在每个 session/rollout 中会多次发出 `token_count` 事件。其中
 
 ### cached_input_tokens 不计入总量
 
-`cached_input_tokens` 是 `input_tokens` 的子集（被缓存命中的那部分）。`total_tokens` 已经正确包含了 input + output + reasoning 的总和。**不要**把 `cached_input_tokens` 额外加到 `total_tokens` 里。
+`cached_input_tokens` 是 `input_tokens` 的子集（被缓存命中的那部分）。`total_tokens` 已经正确包含了 input + output 的总和。**不要**把 `cached_input_tokens` 额外加到 `total_tokens` 里。
 
-### delta 为负数的处理（fork 回溯修正）
+### fork/resume 处理（启发式，不保证 100% 准确）
 
-如果相邻两次 `total_token_usage` 出现下降（`当前 < 上一个`），说明发生了 fork/resume 导致计数器重置。工具会：
+工具通过两层机制减少 fork 导致的重复统计：
 
-1. **回溯移除上一个错误增量**（来自 fork 继承的历史值，已在原始 session 中统计过）
-2. 用当前值作为新一段的增量
-3. 记录 warning
+1. **首个 token_count 启发式检测**：如果某个 rollout 文件的第一个 `token_count` 的 `total_tokens` 超过 500 万（`FORK_SUSPICIOUS_THRESHOLD`），标记为 *suspicious inherited baseline*。正常新 session 的首次消耗远小于此值。
 
-### 首个 token_count 启发式检测
+2. **负 delta 条件回溯**：当相邻两次 `total_token_usage` 下降（`当前 < 上一个`）时：
+   - 如果上一条被标记为 *suspicious* → **回溯移除**上一条错误增量（来自 fork 继承的历史值，已在原始 session 中统计过），用当前值作为新段增量。
+   - 如果上一条不是 suspicious → **保留上一条**，只记录 warning，把当前值作为新一段的增量。
 
-如果某个 rollout 文件的第一个 `token_count` 的 `total_tokens` 超过 500 万，工具会发出 warning——因为正常新 session 的首次消耗远小于此值，大概率是 fork 继承的历史累计。这个阈值可根据实际使用调整（修改 `FORK_SUSPICIOUS_THRESHOLD`）。
+**注意**：如果 fork 后计数器从相同值连续增长（无负 delta），仍可能漏检。建议人工核对 `daily_by_model.csv` 中的异常 spike，并与 OpenAI / Codex Usage Dashboard 做总量交叉校验。
 
-### 午夜边界安全余量
+### `--since` 边界处理
 
-文件路径的日期粗过滤会多保留 1 天的余量（since_date 前一天的目录也会扫描），防止 UTC→本地时区转换导致午夜边界事件丢失。最终仍以事件时间戳归日为准。
+`--since` 过滤发生在增量计算**之前**：即使事件在范围外，也会推进 `prev_tokens` 基线。这确保了跨 `--since` 边界的 rollout 文件不会把完整累计值误当增量。
 
 ### 日期归日
 
-按 `--tz` 指定的时区（默认 `Asia/Shanghai`）转换 UTC 时间戳后归到对应日期。文件名中的日期只做粗过滤，最终以事件 `timestamp` 字段为准。
+按 `--tz` 指定的时区（默认 `Asia/Shanghai`）转换 UTC 时间戳后归到对应日期。
+
+### 默认全量扫描
+
+**默认扫描所有 `rollout-*.jsonl` 文件**，按事件 `timestamp` 精确过滤。这是最准确的方式。
+
+使用 `--fast-path-filter` 可以启用路径日期粗过滤（>=14 天 buffer），减少扫描文件数，但**可能漏掉跨越多日的长会话**。
+
+### 缺失字段容错
+
+- `reasoning_output_tokens`、`cached_input_tokens` 缺失 → 默认 0
+- `total_tokens` 缺失 → 尝试 `input_tokens + output_tokens` 推导，记录 warning
+- 仅当 `total_token_usage` 整体缺失时才跳过该事件
+
+### token_count 识别
+
+不强依赖外层 `type == "event_msg"`。只要 `payload` 是 dict 且 `payload.type == "token_count"`，就处理。
+
+### model 识别
+
+每行 JSON 都递归查找 `model` 字段，找到即更新当前 model，不限于特定事件类型。
 
 ## 多账号目录
 
@@ -90,8 +113,9 @@ python3 codex_usage_local.py \
 
 1. **Codex Web / App / 远程任务** 如果没有写入本地 `~/.codex/sessions`，本工具统计不到。
 2. **`codex exec --json`** 这类 headless 输出的 token 不走普通 session 目录，需要额外处理。
-3. **fork / resume session**：工具会通过负 delta 回溯修正和首个 token 启发式检测来减少 fork 导致的重复统计。但如果 fork 后计数器从相同值连续增长（无负 delta），仍可能漏检。建议人工核对 daily_by_model.csv 中的异常 spike。
-4. **无时间戳的 token_count**：优先从文件名解析；失败则跳过并记录 warning。
+3. **fork / resume session**：fork 处理是启发式的，不保证 100% 准确。建议与 OpenAI / Codex Usage Dashboard 做总量交叉校验。
+4. **`--fast-path-filter`** 可能漏掉跨越多日的长会话（至少 14 天 buffer，但无法覆盖极端情况）。
+5. **无时间戳的 token_count**：优先从文件名解析；失败则跳过并记录 warning。
 
 ## 依赖
 
@@ -101,10 +125,14 @@ python3 codex_usage_local.py \
 ## 测试
 
 ```bash
+# 运行全部测试
 python3 tests/test_sample.py
+python3 tests/test_payload_type_only.py
+python3 tests/test_missing_fields.py
+python3 tests/test_negative_delta_no_pop.py
+python3 tests/test_suspicious_fork_pop.py
+python3 tests/test_since_boundary.py
 ```
-
-测试用构造的 `tests/fixtures/rollout-sample.jsonl` 验证增量统计算法是否正确。
 
 ## 项目结构
 
@@ -112,9 +140,20 @@ python3 tests/test_sample.py
 codex-ledger/
 ├── codex_usage_local.py    # 主工具
 ├── README.md
+├── LICENSE
 ├── tests/
 │   ├── fixtures/
-│   │   └── rollout-sample.jsonl
-│   └── test_sample.py
+│   │   ├── sample/                         # 基础增量算法用例
+│   │   ├── payload_type_only/              # 不依赖外层 event type
+│   │   ├── missing_fields/                 # 缺失字段容错
+│   │   ├── negative_delta_no_pop/          # 普通负 delta 不 pop
+│   │   ├── suspicious_fork_pop/            # suspicious 时负 delta回溯
+│   │   └── since_boundary/                # --since 跨边界基线
+│   ├── test_sample.py
+│   ├── test_payload_type_only.py
+│   ├── test_missing_fields.py
+│   ├── test_negative_delta_no_pop.py
+│   ├── test_suspicious_fork_pop.py
+│   └── test_since_boundary.py
 └── output/
 ```

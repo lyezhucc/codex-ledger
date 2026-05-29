@@ -40,7 +40,7 @@ def run_tool(fixture_dir: Path, out_dir: str) -> subprocess.CompletedProcess:
 
 
 def main() -> None:
-    fixture_dir = Path(__file__).resolve().parent / "fixtures"
+    fixture_dir = Path(__file__).resolve().parent / "fixtures" / "sample"
 
     with tempfile.TemporaryDirectory(prefix="codex_test_") as tmpdir:
         result = run_tool(fixture_dir, tmpdir)

@@ -1,0 +1,3 @@
+{"timestamp":"2026-05-09T15:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":100,"output_tokens":200,"reasoning_output_tokens":0,"total_tokens":700}}}}
+{"timestamp":"2026-05-09T16:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":250,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700}}}}
+{"timestamp":"2026-05-10T00:10:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":400,"output_tokens":900,"reasoning_output_tokens":100,"total_tokens":2900}}}}
