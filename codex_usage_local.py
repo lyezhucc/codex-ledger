@@ -304,12 +304,14 @@ def process_rollout_file(
     tz: timezone,
     since_date: Optional[datetime],
     debug: bool = False,
-) -> Tuple[List[Dict[str, Any]], int]:
-    """处理单个 rollout JSONL 文件，返回增量事件列表和 warning 计数。
+    exclude_suspicious_first: bool = False,
+) -> Tuple[List[Dict[str, Any]], int, List[Dict[str, Any]]]:
+    """处理单个 rollout JSONL 文件，返回增量事件列表、warning 计数和 suspicious 事件列表。
 
-    返回: (raw_events, warning_count)
+    返回: (raw_events, warning_count, suspicious_events)
     """
     events: List[Dict[str, Any]] = []
+    suspicious_events: List[Dict[str, Any]] = []
     warnings = 0
     prev_tokens: Optional[Dict[str, int]] = None
     current_model: str = "unknown"
@@ -414,6 +416,24 @@ def process_rollout_file(
                         )
                         if is_suspicious:
                             warnings += 1
+                            # 生成日期字符串用于 suspicious 事件记录
+                            ts_local_susp = ts.astimezone(tz)
+                            date_str_susp = ts_local_susp.strftime("%Y-%m-%d")
+                            suspicious_events.append({
+                                "date": date_str_susp,
+                                "timestamp": ts.isoformat(),
+                                "account": account,
+                                "model": current_model,
+                                "session_id": session_id,
+                                "cwd": cwd,
+                                "file": str(file_path),
+                                "total_tokens": current["total_tokens"],
+                                "input_tokens": current["input_tokens"],
+                                "output_tokens": current["output_tokens"],
+                                "cached_input_tokens": current["cached_input_tokens"],
+                                "reasoning_output_tokens": current["reasoning_output_tokens"],
+                                "reason": "suspicious_inherited_first_baseline",
+                            })
                             if debug:
                                 print(
                                     f"  [WARN] 首个 token_count total={current['total_tokens']:,} "
@@ -421,6 +441,20 @@ def process_rollout_file(
                                     f"标记为 suspicious inherited baseline: {file_path.name}",
                                     file=sys.stderr,
                                 )
+                            if exclude_suspicious_first:
+                                # 官网对账模式：不将首条大累计值计入增量，仅作为基线
+                                if debug:
+                                    print(
+                                        f"         --exclude-suspicious-first-baseline 已启用，"
+                                        f"跳过此条增量，仅设为 prev_tokens 基线",
+                                        file=sys.stderr,
+                                    )
+                                # 检查是否全为 0
+                                if all(v == 0 for v in current.values()):
+                                    prev_tokens = current
+                                else:
+                                    prev_tokens = current
+                                continue
                         # 检查是否全为 0（初始占位事件）
                         if all(v == 0 for v in current.values()):
                             prev_tokens = current
@@ -505,7 +539,7 @@ def process_rollout_file(
         if debug:
             print(f"  [WARN] 无法读取文件 {file_path}: {e}", file=sys.stderr)
 
-    return events, warnings
+    return events, warnings, suspicious_events
 
 
 def scan_all_rollouts(
@@ -515,6 +549,7 @@ def scan_all_rollouts(
     since_date: Optional[datetime],
     debug: bool = False,
     fast_path_filter: bool = False,
+    exclude_suspicious_first: bool = False,
 ) -> Dict[str, Any]:
     """扫描所有 rollout 文件，返回统计结果。
 
@@ -523,6 +558,7 @@ def scan_all_rollouts(
     """
     FAST_PATH_BUFFER_DAYS = 14
     all_events: List[Dict[str, Any]] = []
+    all_suspicious: List[Dict[str, Any]] = []
     total_files = 0
     total_warnings = 0
 
@@ -566,10 +602,12 @@ def scan_all_rollouts(
 
     for idx, (file_path, account) in enumerate(file_list):
         total_files += 1
-        events, warns = process_rollout_file(
-            file_path, account, tz, since_date, debug=debug
+        events, warns, suspicious = process_rollout_file(
+            file_path, account, tz, since_date, debug=debug,
+            exclude_suspicious_first=exclude_suspicious_first,
         )
         all_events.extend(events)
+        all_suspicious.extend(suspicious)
         total_warnings += warns
 
         # 进度提示
@@ -584,6 +622,7 @@ def scan_all_rollouts(
 
     return {
         "events": all_events,
+        "suspicious_events": all_suspicious,
         "total_files": total_files,
         "total_warnings": total_warnings,
     }
@@ -733,6 +772,7 @@ def export_csvs(
     grand: Dict[str, int],
     pricing_data: Optional[Dict[str, Any]] = None,
     session_ranking: Optional[List[Dict[str, Any]]] = None,
+    suspicious_events: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     """导出所有 CSV 文件，返回文件路径列表。"""
     files_written = []
@@ -774,6 +814,15 @@ def export_csvs(
     path = os.path.join(output_dir, "grand_total.csv")
     write_csv(path, [grand], gt_fields)
     files_written.append(path)
+
+    # suspicious_events.csv
+    if suspicious_events:
+        se_fields = [
+            "date", "timestamp", "account", "model", "session_id", "cwd", "file",
+        ] + TOKEN_FIELDS + ["reason"]
+        path = os.path.join(output_dir, "suspicious_events.csv")
+        write_csv(path, suspicious_events, se_fields)
+        files_written.append(path)
 
     # session_ranking.csv
     if session_ranking:
@@ -848,6 +897,7 @@ def print_report(
     pricing_data: Optional[Dict[str, Any]] = None,
     session_ranking: Optional[List[Dict[str, Any]]] = None,
     session_top_n: int = 30,
+    suspicious_events: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """打印终端汇总报告。"""
     events = scan_result["events"]
@@ -857,6 +907,9 @@ def print_report(
     def fmt_num(n: int) -> str:
         return f"{n:,}"
 
+    suspicious = scan_result.get("suspicious_events", []) or []
+    suspicious_sum = sum(s["total_tokens"] for s in suspicious)
+
     print()
     print("=" * 68)
     print("  Codex Token 使用量统计报告")
@@ -865,6 +918,9 @@ def print_report(
     print(f"  扫描文件数:                    {total_files:,}")
     print(f"  有效 token_count 增量事件数:   {len(events):,}")
     print(f"  warning 数:                    {total_warnings:,}")
+    if suspicious:
+        print(f"  suspicious 事件数:             {len(suspicious):,}")
+        print(f"  suspicious total_tokens 合计:  {fmt_num(suspicious_sum)}")
     print()
     print("  ── 总量 ──")
     print(f"  总 token (total_tokens):        {fmt_num(grand['total_tokens'])}")
@@ -1070,6 +1126,12 @@ def main() -> None:
         default=30,
         help="终端显示的会话排名数量（默认 30）",
     )
+    parser.add_argument(
+        "--exclude-suspicious-first-baseline",
+        action="store_true",
+        default=False,
+        help="排除首个 token_count 超过 500 万的继承历史累计值（官网对账模式）",
+    )
 
     args = parser.parse_args()
 
@@ -1126,9 +1188,11 @@ def main() -> None:
         sessions_dirs, account_names, tz, since_date,
         debug=args.debug,
         fast_path_filter=args.fast_path_filter,
+        exclude_suspicious_first=args.exclude_suspicious_first_baseline,
     )
 
     events = scan_result["events"]
+    suspicious_events = scan_result.get("suspicious_events", [])
 
     # 汇总
     daily_model = aggregate_daily_by_model(events)
@@ -1156,6 +1220,7 @@ def main() -> None:
         grand,
         pricing_data,
         session_ranking,
+        suspicious_events,
     )
 
     # 导出 JSON
@@ -1205,6 +1270,7 @@ def main() -> None:
         pricing_data,
         session_ranking,
         args.session_top,
+        suspicious_events,
     )
 
 
