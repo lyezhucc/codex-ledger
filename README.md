@@ -19,6 +19,9 @@ python3 codex_usage_local.py --since 2026-05-03 --out ~/Desktop/report --json --
 
 # 启用路径日期粗过滤（加速但可能漏长会话）
 python3 codex_usage_local.py --since 2026-05-03 --fast-path-filter ~/.codex
+
+# 官网对账模式（排除 fork 继承的历史累计值）
+python3 codex_usage_local.py --since 2026-05-03 --exclude-suspicious-first-baseline --by-session --json ~/.codex
 ```
 
 ## 给普通用户的使用教程
@@ -61,7 +64,9 @@ open ~/Desktop/codex-ledger-report
 | `model_total.csv` | 按模型统计 |
 | `daily_by_model.csv` | 按天+模型统计 |
 | `raw_events.csv` | 原始增量事件，排查异常用 |
-| `report.json` | 完整 JSON 报告 |
+| `session_ranking.csv`（需 `--by-session`） | 按会话 token 排名 |
+| `suspicious_events.csv` | fork 继承历史事件明细 |
+| `report.json`（需 `--json`） | 完整 JSON 报告 |
 
 ### 5. 统计多个 Codex 目录
 
@@ -86,6 +91,31 @@ python3 codex_usage_local.py \
 
 **为什么不能直接看 total_token_usage 相加？**
 因为它是一个 rollout 内的累计值，不是单次消耗。直接相加会严重高估。
+
+**为什么本地统计和官网对不上？**
+可能有几个原因：
+1. 你统计的是 raw total_tokens（含缓存），官网可能显示 billable-equivalent（非缓存折算）
+2. fork/resume session 的首条累计值可能被计入
+3. Codex Web/App 用量不写本地日志
+
+用官网对账模式快速排查：
+
+```bash
+python3 codex_usage_local.py \
+  --since 2026-05-03 \
+  --tz Asia/Shanghai \
+  --out ~/Desktop/codex-ledger-reconcile \
+  --json \
+  --exclude-suspicious-first-baseline \
+  ~/.codex
+```
+
+重点查看：
+- `suspicious_events.csv` → 如果有数据行且 total 很大，就是 fork 继承历史导致高估
+- `grand_total.csv` → 对比 raw 模式的结果，看差值
+- `report.json` → `summary.suspicious_total_tokens` 字段
+
+如果 reconcile 模式明显接近官网数字，说明之前是 fork/resume 首条继承历史导致高估。
 
 ## Codex 对话式使用
 
@@ -129,6 +159,8 @@ Codex 会自动执行统计并给出中文总结。
 | `model_total.csv` | 按模型汇总 |
 | `account_total.csv` | 按账号/目录汇总 |
 | `grand_total.csv` | 总量（一行） |
+| `session_ranking.csv`（需 `--by-session`） | 按会话 token 消耗排名 |
+| `suspicious_events.csv` | fork 继承历史事件明细 |
 | `report.json`（需 `--json`） | JSON 格式完整报告 |
 
 ## 统计口径
@@ -162,7 +194,7 @@ Codex 在每个 session/rollout 中会多次发出 `token_count` 事件。其中
    - 如果上一条被标记为 *suspicious* → **回溯移除**上一条错误增量（来自 fork 继承的历史值，已在原始 session 中统计过），用当前值作为新段增量。
    - 如果上一条不是 suspicious → **保留上一条**，只记录 warning，把当前值作为新一段的增量。
 
-**注意**：如果 fork 后计数器从相同值连续增长（无负 delta），仍可能漏检。建议人工核对 `daily_by_model.csv` 中的异常 spike，并与 OpenAI / Codex Usage Dashboard 做总量交叉校验。
+**注意**：如果 fork 后计数器从相同值连续增长（无负 delta），仍可能漏检。建议使用 `--exclude-suspicious-first-baseline` 对账模式排除首条大累计值，并与 OpenAI / Codex Usage Dashboard 做总量交叉校验。
 
 ### `--since` 边界处理
 
@@ -229,6 +261,7 @@ python3 tests/test_negative_delta_no_pop.py
 python3 tests/test_suspicious_fork_pop.py
 python3 tests/test_suspicious_then_normal.py
 python3 tests/test_since_boundary.py
+python3 tests/test_exclude_suspicious_first_baseline.py
 ```
 
 ## 项目结构
@@ -255,13 +288,15 @@ codex-ledger/
 │   │   ├── negative_delta_no_pop/          # 普通负 delta 不 pop
 │   │   ├── suspicious_fork_pop/            # suspicious 时负 delta 回溯
 │   │   ├── suspicious_then_normal/         # suspicious→正常→负delta 不误pop
-│   │   └── since_boundary/                # --since 跨边界基线
+│   │   ├── since_boundary/                # --since 跨边界基线
+│   │   └── exclude_suspicious_first/       # --exclude-suspicious-first-baseline
 │   ├── test_sample.py
 │   ├── test_payload_type_only.py
 │   ├── test_missing_fields.py
 │   ├── test_negative_delta_no_pop.py
 │   ├── test_suspicious_fork_pop.py
 │   ├── test_suspicious_then_normal.py
-│   └── test_since_boundary.py
+│   ├── test_since_boundary.py
+│   └── test_exclude_suspicious_first_baseline.py
 └── output/
 ```

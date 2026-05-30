@@ -19,6 +19,7 @@ tests=(
     "tests/test_suspicious_fork_pop.py"
     "tests/test_suspicious_then_normal.py"
     "tests/test_since_boundary.py"
+    "tests/test_exclude_suspicious_first_baseline.py"
 )
 
 passed=0

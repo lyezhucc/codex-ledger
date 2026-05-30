@@ -34,8 +34,10 @@ def main() -> None:
         checks.append(("2 个增量事件 (事件1 被 pop)", bool(re.search(r"有效 token_count 增量事件数:\s+2\b", output))))
         # 总量 = 700 + 1500 = 2200
         checks.append(("total=2200", bool(re.search(r"总 token \(total_tokens\):\s+2,?200\b", output))))
-        # 不应出现 5,300,000
-        checks.append(("不含 5,300,000 (suspicious 已移除)", "5,300,000" not in output and "5300000" not in output.replace(",", "")))
+        # suspicious 已从增量中移除，总量不含 5,300,000
+        checks.append(("总量行不含 5,300,000", not re.search(r"总 token \(total_tokens\).*5,?3[0-9]{2},?0{3}", output)))
+        # suspicious 会在摘要行显示（用于排查），这是正确的
+        checks.append(("suspicious 摘要存在", "suspicious total_tokens 合计:" in output))
 
         all_ok = True
         for msg, ok in checks:

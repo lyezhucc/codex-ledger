@@ -1226,22 +1226,30 @@ def main() -> None:
     # 导出 JSON
     json_path: Optional[str] = None
     if args.json_output:
+        suspicious_summary = {
+            "total_suspicious_events": len(suspicious_events),
+            "suspicious_total_tokens": sum(e["total_tokens"] for e in suspicious_events),
+            "exclude_suspicious_first_baseline": args.exclude_suspicious_first_baseline,
+        }
         report_data = {
             "config": {
                 "since": args.since,
                 "tz": args.tz,
                 "directories": [str(sd) for sd in sessions_dirs],
+                "exclude_suspicious_first_baseline": args.exclude_suspicious_first_baseline,
             },
             "summary": {
                 "total_files": scan_result["total_files"],
                 "total_events": len(events),
                 "total_warnings": scan_result["total_warnings"],
+                **suspicious_summary,
             },
             "grand_total": grand,
             "by_model": model_totals,
             "by_account": account_totals,
             "daily_by_model": daily_model,
             "daily_by_account_model": daily_account_model,
+            "suspicious_events": suspicious_events,
             "raw_events": events,
         }
         if pricing_data:
