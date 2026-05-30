@@ -652,6 +652,54 @@ def aggregate_by_account(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return rows
 
 
+def aggregate_by_session(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按 session（rollout 文件）汇总，按 total_tokens 降序排列。"""
+    groups: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {
+            f: 0 for f in TOKEN_FIELDS
+        }
+    )
+    # 额外记录每个 session 的元信息
+    meta: Dict[str, Dict[str, str]] = {}
+
+    for e in events:
+        fpath = e["file"]
+        for f in TOKEN_FIELDS:
+            groups[fpath][f] += e[f]
+        if fpath not in meta:
+            meta[fpath] = {
+                "account": e["account"],
+                "model": e["model"],
+                "session_id": e["session_id"],
+                "cwd": e["cwd"],
+                "date": e["date"],
+                "events": 0,
+            }
+        meta[fpath]["events"] += 1
+        # 更新 model（取最后出现的）
+        meta[fpath]["model"] = e["model"]
+        # 更新 date（取最后出现的，即最新活动日期）
+        meta[fpath]["date"] = e["date"]
+
+    rows = []
+    for fpath, totals in groups.items():
+        m = meta.get(fpath, {})
+        rows.append({
+            "file": fpath,
+            "account": m.get("account", "unknown"),
+            "session_id": m.get("session_id", "unknown"),
+            "model": m.get("model", "unknown"),
+            "cwd": m.get("cwd", "unknown"),
+            "date": m.get("date", "unknown"),
+            "event_count": m.get("events", 0),
+            **totals,
+        })
+
+    # 按 total_tokens 降序排列
+    rows.sort(key=lambda r: -r["total_tokens"])
+    return rows
+
+
 def grand_total(events: List[Dict[str, Any]]) -> Dict[str, int]:
     """计算总量。"""
     totals = {f: 0 for f in TOKEN_FIELDS}
@@ -684,6 +732,7 @@ def export_csvs(
     account_totals: List[Dict[str, Any]],
     grand: Dict[str, int],
     pricing_data: Optional[Dict[str, Any]] = None,
+    session_ranking: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     """导出所有 CSV 文件，返回文件路径列表。"""
     files_written = []
@@ -725,6 +774,20 @@ def export_csvs(
     path = os.path.join(output_dir, "grand_total.csv")
     write_csv(path, [grand], gt_fields)
     files_written.append(path)
+
+    # session_ranking.csv
+    if session_ranking:
+        sr_fields = [
+            "rank", "date", "account", "model", "session_id", "cwd", "file",
+            "event_count",
+        ] + TOKEN_FIELDS
+        path = os.path.join(output_dir, "session_ranking.csv")
+        # 添加排名序号
+        ranked = []
+        for i, row in enumerate(session_ranking, 1):
+            ranked.append({"rank": i, **row})
+        write_csv(path, ranked, sr_fields)
+        files_written.append(path)
 
     # 定价 CSV
     if pricing_data:
@@ -783,6 +846,8 @@ def print_report(
     files_written: List[str],
     json_path: Optional[str],
     pricing_data: Optional[Dict[str, Any]] = None,
+    session_ranking: Optional[List[Dict[str, Any]]] = None,
+    session_top_n: int = 30,
 ) -> None:
     """打印终端汇总报告。"""
     events = scan_result["events"]
@@ -844,6 +909,37 @@ def print_report(
         print(f"  {'-'*30} {'-'*15}")
         for row in account_totals:
             print(f"  {row['account']:<30} {fmt_num(row['total_tokens']):>15}")
+        print()
+
+    # 会话排名
+    if session_ranking:
+        top_n = min(session_top_n, len(session_ranking))
+        total_sessions = len(session_ranking)
+        top_total = sum(r["total_tokens"] for r in session_ranking[:top_n])
+        top_pct = (top_total / grand["total_tokens"] * 100) if grand["total_tokens"] > 0 else 0
+
+        print(f"  ── 会话 Token 排名 (Top {top_n}/{total_sessions}) ──")
+        print(f"  {'排名':<4} {'总Token':>14} {'模型':<16} {'事件数':>7} {'日期':>12} {'工作目录'}")
+        print(f"  {'-'*4} {'-'*14} {'-'*16} {'-'*7} {'-'*12} {'-'*40}")
+
+        for i, row in enumerate(session_ranking[:top_n], 1):
+            cwd_short = row.get("cwd", "?")
+            # 简化路径显示
+            home = os.path.expanduser("~")
+            if cwd_short.startswith(home):
+                cwd_short = "~" + cwd_short[len(home):]
+            if len(cwd_short) > 42:
+                cwd_short = "..." + cwd_short[-39:]
+
+            print(
+                f"  {i:<4} {fmt_num(row['total_tokens']):>14} "
+                f"{row['model']:<16} {row['event_count']:>7} "
+                f"{row['date']:>12} {cwd_short}"
+            )
+
+        print()
+        print(f"  Top {top_n} 合计: {fmt_num(top_total)} tokens "
+              f"(占总量 {top_pct:.1f}%)")
         print()
 
     # 定价换算
@@ -935,7 +1031,7 @@ def main() -> None:
         "--out",
         type=str,
         default=None,
-        help="CSV 输出目录（默认 ~/Desktop/codex-ledger-report）",
+        help="CSV 输出目录（默认当前目录下的 ./output）",
     )
     parser.add_argument(
         "--json",
@@ -962,6 +1058,18 @@ def main() -> None:
         default=False,
         help="输出跨供应商价格换算（OpenAI API / DeepSeek / Claude）",
     )
+    parser.add_argument(
+        "--by-session",
+        action="store_true",
+        default=False,
+        help="按会话（rollout 文件）汇总排名，输出 session_ranking.csv",
+    )
+    parser.add_argument(
+        "--session-top",
+        type=int,
+        default=30,
+        help="终端显示的会话排名数量（默认 30）",
+    )
 
     args = parser.parse_args()
 
@@ -983,7 +1091,7 @@ def main() -> None:
     if args.out:
         output_dir = os.path.expanduser(args.out)
     else:
-        output_dir = os.path.expanduser("~/Desktop/codex-ledger-report")
+        output_dir = os.path.join(os.getcwd(), "output")
 
     # 解析 sessions 目录
     sessions_dirs: List[Path] = []
@@ -1029,6 +1137,9 @@ def main() -> None:
     account_totals = aggregate_by_account(events)
     grand = grand_total(events)
 
+    # 会话排名（按 --by-session 或始终计算，因为便宜）
+    session_ranking = aggregate_by_session(events) if args.by_session else None
+
     # 定价换算
     pricing_data: Optional[Dict[str, Any]] = None
     if args.pricing:
@@ -1044,6 +1155,7 @@ def main() -> None:
         account_totals,
         grand,
         pricing_data,
+        session_ranking,
     )
 
     # 导出 JSON
@@ -1091,6 +1203,8 @@ def main() -> None:
         files_written,
         json_path,
         pricing_data,
+        session_ranking,
+        args.session_top,
     )
 
 
